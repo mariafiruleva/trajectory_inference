@@ -1,0 +1,161 @@
+---
+title: "trajectory_analysis"
+author: "Maria Firulyova"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F)
+```
+
+```{r load_libs}
+suppressMessages(library(babelwhale))
+suppressMessages(library(dyno))
+suppressMessages(library(dplyr))
+suppressMessages(library(tidyverse))
+suppressMessages(library(sctransform))
+suppressMessages(library(SeuratData))
+suppressMessages(library(Seurat))
+```
+
+## Info
+
+* Article: https://www.nature.com/articles/s41587-019-0071-9
+* Quick start: https://dynverse.org/users/2-quick_start/
+* Methods: https://dynverse.org/reference/dynmethods/
+
+## Requirements
+
+* singularity (version > 3): https://anaconda.org/conda-forge/singularity
+* dyno: https://dynverse.org/users/1-installation/
+* Seurat
+
+## Config singularity
+
+Dyno authos wrap multiple methods for trajectory inference into both Docker and Singularity containers.
+Since docker requires sudo, I use singularity.
+
+```{r}
+set_default_config(create_singularity_config(cache_dir = 'sin_cahce'))
+```
+
+## Define some functions
+
+```{r}
+get_data <- function(obj, assay = 'SCT') {
+  wrap_data <- wrap_expression(counts = t(as.matrix(obj@assays[[assay]]@counts)),
+                               expression = t(as.matrix(obj@assays[[assay]]@data)))
+  wrap_data <- add_grouping(wrap_data,
+                            obj$seurat_clusters)
+  wrap_data
+}
+
+get_branching_point <- function(model, obj) {
+  branching_milestone <- model$milestone_network %>%
+    group_by(from) %>%
+    filter(n() > 1) %>%
+    pull(from) %>% dplyr::first()
+  branch_point <-
+    calculate_branching_point_feature_importance(model,
+                                                 expression_source =
+                                                   obj$expression,
+                                                 milestones_oi = branching_milestone)
+  branch_point
+}
+
+```
+
+
+## Prepare Seurat object
+
+```{r}
+set.seed(1)
+
+get_seurat <- function(obj) {
+  data("pbmc3k")
+  pbmc3k <- pbmc3k[, sample(colnames(pbmc3k), size = 5e2, replace = F)]
+  pbmc3k <-
+    PercentageFeatureSet(pbmc3k, pattern = "^MT-", col.name = "percent.mt")
+  pbmc3k <-
+    SCTransform(pbmc3k, vars.to.regress = "percent.mt", verbose = FALSE)
+  pbmc3k <- RunPCA(pbmc3k, verbose = FALSE)
+  pbmc3k <- RunUMAP(pbmc3k, dims = 1:30, verbose = FALSE)
+  pbmc3k <- FindNeighbors(pbmc3k, dims = 1:30, verbose = FALSE)
+  pbmc3k <- FindClusters(pbmc3k, verbose = FALSE)
+  pbmc3k
+}
+
+pbmc3k <- get_seurat()
+```
+
+## Convert seurat object to input data for dyno wrapper
+
+```{r}
+obj <- get_data(pbmc3k)
+str(obj)
+```
+
+## Infer thajectory
+
+For demonstration purpose I choose the slingshot method, however you can run multiple methods by one command (see `?infer_trajectory`).
+
+```{r}
+set.seed(1)
+model <- infer_trajectory(obj, method = 'slingshot', verbose = TRUE)
+```
+
+## Get UMAP for better visualization
+
+```{r}
+dimred <- dyndimred::dimred_umap(obj$expression)
+
+```
+
+## Calculate some features: feature importance, branch points
+
+```{r}
+branch_feature_importance <-
+  calculate_branch_feature_importance(model, expression_source = obj$expression)
+branch_feature_importance
+```
+
+```{r}
+branch_point <- get_branching_point(model, obj)
+branch_point
+```
+
+## Visualize trajectory
+
+```{r}
+plot_dimred(
+  model,
+  dimred = dimred,
+  expression_source = obj$expression,
+  color_density = "grouping",
+  alpha_cells = 0.7,
+  grouping = obj$grouping,
+  label_milestones = FALSE,
+) +
+  theme(aspect.ratio = 1, legend.position = "none")
+```
+
+## Genes important at bifurcation points
+
+```{r}
+plot_heatmap(
+  model,
+  expression_source = obj,
+  features_oi = unique(branch_point %>% top_n(30, importance) %>% pull(feature_id))
+)
+```
+
+## Lineage / branch markers: "3" lineage
+
+```{r}
+features <- branch_feature_importance %>%
+  filter(to == "3") %>%
+  top_n(30, importance) %>%
+  pull(feature_id)
+plot_heatmap(model, expression_source = obj, features_oi = features) +
+  ggtitle('features important for branch to 3')
+```
